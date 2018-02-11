@@ -1,0 +1,240 @@
+---
+title: "My Path Down the AUC Rabbit Hole and into Open Source"
+author: "Michael Frasco"
+date: "2018-02-10"
+output: html_document
+---
+
+On 2017-11-03, my eight month journey into the world of open source software reached its first major milestone when I became the new maintainer of the [Metrics package](https://github.com/mfrasco/Metrics) in R. The path I took to get there is full of fascinating statistics and the excitement of contributing to something bigger than the collection of files on my local machine. I want to tell you the story.
+
+## Peaking Into the Rabbit Hole
+
+In the spring of 2017, my teammate at work submitted a PR that contained a fascinating function:
+
+```{r, message=FALSE}
+library(data.table)
+fast_auc <- function(preds, target) {
+    preds_pos <- preds[target == 1]; num_pos = as.numeric(length(preds_pos))
+    preds_neg <- preds[target == 0]; num_neg = length(preds_neg)
+    rankings <- data.table::frank(c(preds_pos, preds_neg))
+    auc <- (sum(rankings[1:num_pos]) - num_pos * (num_pos + 1) / 2) / (num_pos * num_neg)
+    return(auc)
+}
+```
+
+When I first read over this function, I was a bit confused. After reading [the reference link](https://stat.ethz.ch/pipermail/r-help/2005-September/079872.html) my teammate provided in her PR, my jaw dropped. If your jaw hasn't dropped yet, let me try to give a quick summary of the beauty contained within this seven-line function.
+
+### Background on AUC
+
+Machine learning models that deal with classifying observations into one of two categories are commonly evaluated with something called AUC, which stands for the area under the curve. The curve being referenced here is the receiver operating characteristic (ROC) curve. The ROC curve plots the sensitivity of a classifier against 1 - specificity, as the decision threshold between the positive and the negative class changes. You can get the definitions of these terms from the [most useful wikipedia page on the internet](https://en.wikipedia.org/wiki/Confusion_matrix). Here is an example of what an ROC curve looks like:
+
+```{r, message=FALSE, fig.height=3.5, fig.width=6.5}
+library(precrec)
+preds <- c(rbeta(500, 25, 30), rbeta(500, 30, 25))
+target <- rep(c(0, 1), each = 500)
+curves <- evalmod(mode = 'rocprc', scores = preds, labels = target)
+plot(curves, curvetype = 'roc')
+```
+
+If we want to compare the performance of two different models, it can be difficult to directly compare their ROC curves. However, we can obtain a single number from the ROC curve by integrating the area beneath it. Then, we can choose whichever model has the larger AUC.
+
+### What is the function doing?
+
+The function posted above calculates the exact AUC without calculating the ROC curve. When I saw this, I asked myself, "How does it integrate a curve without having the curve in the first place?". At face value, it seems like some statistical voodoo is happening that shouldn't be trusted.
+
+I'm here to tell you that you can trust this function. Later in this blog post, I'll talk in depth about the statistical formula it uses, but first I need to talk about why this function is useful at all.
+
+### Benchmarking Popular Packages
+
+Even though computing the AUC is a very common way to evaluate machine learning models, some of the popular packages in R that calculate ROC curves are quite slow on large datasets. For example, here is a comparison of the time it takes to calculate AUC with the ROCR package and with the function posted above.
+
+```{r, message=FALSE}
+library(ROCR)
+library(microbenchmark)
+rocr_auc <- function(preds, target) {
+    pred_obj <- prediction(predictions = preds, labels = target)
+    auc <- performance(pred_obj, measure = 'auc')@y.values[[1]]
+    return(auc)
+}
+preds <- c(rbeta(1e6, 25, 30), rbeta(1e6, 30, 25))
+target <- rep(c(0, 1), each = 1e6)
+microbenchmark(rocr = rocr_auc(preds, target), fast = fast_auc(preds, target), times = 10)
+```
+
+With a data set of two million observations, the fast function is about ten times faster than the ROCR function. While 2-3 seconds may not seem like a long time, repeated uses of this function can become costly. In the PR where this function was used, my teammate was building tools that searched over different feature engineering and model building strategies. She used the AUC from each successive model to intelligently guide the search, which required computing the AUC for hundreds of models. By using this faster function, she saved a significant amount of computation time.
+
+It's worth saying that the biggest cause for the speedup in `fast_auc` is the C++ implementation of `frank` from the `data.table` package. This function is significantly faster than `rank` in base R. Indeed, using the `precrec` package, which is also implemented in C++, to calculate the full ROC curve is actually faster than using the algorithm above with `rank` instead of `frank`. Thanks to Matt Dowle and the `data.table` team for all of their amazing work.
+
+Looking back on this problem in optimization, an even faster strategy would have been to compute the AUC on a random sample of observations. Luckily, that solution wasn't used in the PR. If it had been, I would have never gone down this journey.
+
+## Falling Down the Rabbit Hole
+
+### Reading the Documentation
+
+My investigation into the statistics behind `fast_auc` began with the hint left [in the reference link](https://stat.ethz.ch/pipermail/r-help/2005-September/079872.html) to read the documentation of `colAUC` in the `caTools` package. In the description of one of its arguments I read:
+
+> Algorithm to use: "ROC" integrates ROC curves, while "Wilcoxon" uses Wilcoxon Rank Sum Test to get the same results. Default "Wilcoxon" is faster.
+
+So this was the statistical formula behind the fast AUC calculation! I knew about the Wilcoxon Rank Sum Test as a non-parametric alternative to the t-test, but didn't recall learning about any connection with the ROC curve. Finding no relevant information within the documentation, I turned to the wikipedia page for the Mann Whitney test, which is another name for the two-sample Wilcoxon test.
+
+### Understanding the Fast AUC Function
+
+Upon navigating to [the wikipedia page](https://en.wikipedia.org/wiki/Mann-Whitney_U_test), I was delighted to find a section titled `Relation to other tests` with a subsection called `Area-under-curve (AUC) statistic for ROC curves`.
+
+In the first paragraph, it states:
+
+> The Mann-Whitney Test is a nonparametric test of the null hypothesis that it is equally likely that a randomly selected value from one sample will be less than or greater than a randomly selected value from a second sample.
+
+In the rest of this section, we will unpack that definition to see how we can derive the implementation for the `fast_auc` function.
+
+Let the first sample be the predictions of observations from the positive class and the second sample be the predictions from the negative class. Calculate all of the pairwise combinations between one observation from the positive class and one from the negative class. In order to perform the Mann-Whitney test, we count the number of pairs where the prediction from the positive class is greater than that from the negative class. If the two predictions are equal, our count increases by `1/2`.
+
+Since calculating all of the pairwise combinations can be slow for large data sets, the Mann-Whitney test uses rankings to quickly count the pairs. When we give a ranking to an observation, `x`, it is equivalent to one plus the number of other observations less than `x`, where ties count as `1/2`. We add one at the beginning because of the comparison of the observation with itself.
+
+For example, let's say that our predictions from the positive class are `0.4, 0.7` and our predictions from the negative class are `0.1, 0.4`. Then, our combined predictions are `0.4, 0.7, 0.1, 0.4`. Here is how we calculate the rankings for each observation.
+
+1. Since `0.4` is greater than one observation (i.e. `0.1`), there is one tie with another observation, and we add one for the comparison with itself, the rank is equal to `1 + 1/2 + 1 = 2.5`.
+2. `0.7` is greater than three observations. Therefore, the rank is equal to `3 + 1 = 4`.
+3. `0.1` is greater than zero observations. The rank is equal to `0 + 1 = 1`.
+4. The rank for the second `0.4` is identical to the first `0.4`.
+
+If we add up the rankings from the observations of the positive class, we get the number of pairwise combinations of an observation from the positive class with another observation from either class where the first observation is larger. The crucial insight into efficiently calculating the Mann-Whitney test is recognizing that we simply need to take this number and subtract the counts from the pairs where both observations are from the positive class.
+
+Fortunately, this is easily done. Imagine having N observations in the positive class. The smallest observation is greater than zero other observations plus one for the comparison to itself. The second smallest observation greater `1 + 1 = 2` observations. And the last observation is greater than `(N - 1) + 1 = N` observations. In order to sum the numbers from `1` to `N` we can use the formula `N * (N - 1) / 2`.
+
+Therefore, if we sum the rankings from the positive class and subtract `N * (N - 1) / 2`, we can efficiently calculate the Mann-Whitney statistic. And, if you look back at the definition of the `fast_auc` function, this is exactly what it is doing!.
+
+### Rethinking our Interpretation of AUC
+
+I just lied to you. `fast_auc` takes the count of the number of pairs where the observation from the positive class is greater than the observation from the negative class and divides it by the total number of possible pairs. Since the probability of an event happening is equal to the total number of times it happens divided by the total number of times it could happen, we can interpret the output of `fast_auc` as providing the probability that a randomly chosen observation from the positive class is greater than a randomly chosen observation from the negative class.
+
+This is worth restating. AUC, which is usually thought of as the area under a curve created by plotting the sensitivity and specificity of a classifier at different thresholds, has this interpretation:
+
+> AUC is the probability that a randomly chosen observation from the positive class is greater than a randomly chosen observation from the negative class.
+
+Wonderful. But as soon as I understood how the code within `fast_auc` provides that probability, I needed to undertand how this relates to the typical interpretation of `auc`. So, I clicked on a link that took me to the wikipedia page for the [receiver operating characteristic curve](https://en.wikipedia.org/wiki/Receiver_operating_characteristic#Area_under_the_curve). Under the section titled `Area under the Curve`, it provides a derivation, which I recreate below:
+
+#### Derivation of AUC
+
+##### Definitions!
+
+In this derivation, we are going to use the fact that the sensitivity of a classifier is equal to the true positive rate and that 1 - specificity is equal to the false positive rate. Furthermore, we are going to assume that we classify an observation as a positive instance if the score for the observation is greater than some threshold $T$, where $T$ is a value between $-\infty$ and $\infty$
+
+Let $f_0(T)$ be the probability density function of observations from the negative class at threshold $T$. Define $f_1(T)$ similarly for the positive class. Next, define $F_0(T) = \int_{-\infty}^T f_0(t) ~dt$ and $F_1(T) = \int_{-\infty}^T f_1(t) ~dt$ as the cumulative density functions for the corresponding probability density function.
+
+We have that the $1 - F_0(T)$ is the false positive rate at threshold $T$, since it represents the proportion of negative instances that are greater than $T$. Similarly, we have that $1 - F_1(T)$ is the true positive rate of a classifier at threshold $T$, since it represents the proportion of positive instances that are greater than $T$.
+
+If we let $1 - F_0(T) = v$ be the false positive rate, we can say that $T = F_0^{-1}(1 - v)$, where $F_0^{-1}$ is the inverse cumulative distribution function that maps a false positive rate to a given threshold.
+
+##### Integrals!
+
+Now, we can define AUC as an integral from $0$ to $1$ as follows:
+
+$$
+\begin{eqnarray}
+AUC = \int_0^1 1 - F_1\big(~F_0^{-1}(1 - v)~\big) ~dv
+\end{eqnarray}
+$$
+
+Next, if we use $1 - F_0(t) = v$ to perform a change of variables, we have that $dv = -f_0(t) ~dt$. So we get:
+
+$$
+\begin{eqnarray}
+AUC & = & \int_{-\infty}^{\infty} \Big[1 - F_1\Big(~F_0^{-1}\big(~F_0(t)~\big)\Big)\Big] ~f_0(t) ~dt \\
+& = & \int_{-\infty}^{\infty} \Big[1 - F_1(t)\Big] ~f_0(t) ~dt
+\end{eqnarray}
+$$
+
+Since small values a false positive rate of $0$ corresponds to a threshold of $\infty$, I used the negative sign from $dv = -f_0(t) ~dt$ to get the integral from $-\infty$ to $\infty$. Next, we can use the definition of a cumulative density function to get
+
+$$
+\begin{eqnarray}
+AUC & = & \int_{-\infty}^{\infty} \Big[\int_{t}^{\infty} f_1(s) ~ds\Big] ~f_0(t) ~dt \\
+& = & \int_{-\infty}^{\infty} \int_{t}^{\infty} f_1(s) ~f_0(t) ~ds ~dt \\
+& = & \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} I(s > t) ~f_1(s) ~f_0(t) ~ds ~dt \\
+& = & P(s > t)
+\end{eqnarray}
+$$
+
+Here, $I(s > t)$ is the indicator function for the event that a randomly chosen observation from the positive class is greater than a randomly chosen observation from the negative class.
+
+## Contributing to Open Source
+
+While I was absorbing as much information about AUC, I also checked whether various open source tools were aware of this fast algorithm. While I had never contributed to an open source project before, it was something that I always wanted to do.
+
+Of all of the different packages I looked at, one stuck out in particular: the `Metrics` package in R. When I first came across it, the function looked like this:
+
+```{r}
+auc <- function(actual, predicted) {
+    r <- rank(predicted)
+    n_pos <- sum(actual == 1)
+    n_neg <- length(actual) - n_pos
+    auc <- (sum(r[actual == 1]) - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
+    auc
+}
+```
+
+Other than the use of `rank` instead of `data.table::frank`, the function from the Metrics package was almost identical to `fast_auc` from above. It was extremely satisfying to see that other people were using the same fast algorithm. However, there was one problem: `metrics::auc` didn't work on large datasets.
+
+```{r}
+preds <- c(rbeta(1e6, 25, 30), rbeta(1e6, 30, 25))
+target <- rep(c(0, 1), each = 1e6)
+auc(target, preds)
+```
+
+The integer overflow was caused by the fact that `sum(actual == )` produces an integer, `length(actual)` produces an integer, and subtracting two integers in also produces an integer. As a result, `n_pos` and `n_neg` are both represented as integers when `n_pos * n_neg` is executed. Unfortunately, for large datasets, this can often lead to values greater than `2 ^ 31 - 1`, which is greater than the value of `.Machine$integer.max` on most computers.
+
+### My First Pull Request
+
+Fortunately, the function could be fixed in a single line. All I needed to do was change `n_pos <- sum(actual == 1)` to `n_pos <- as.numeric(sum(actual == 1))`. This would cast `n_pos` from an integer to a double, thereby preventing integer overlow in the subsequent calculation.
+
+When I submitted [a pull request](https://github.com/benhamner/Metrics/pull/36) containing my bugfix, the package failed to build on Travis CI. However, the problem wasn't with my PR. After looking at the other isues and pull requests in the repository, I realized that the person who had originally authored the package was no longer actively maintaining the repository or any of its tests. In fact, [an issue](https://github.com/benhamner/Metrics/issues/34) had been recently created informing the package maintainer that CRAN had changed the maintainer status of the package to "ORPHANED". This happens when the package maintainer is unresponsive to emails.
+
+Initially, I was disappointed that my PR wouldn't be accepted and that the integer overflow bug wouldn't be fixed. However, when I read through CRAN's [policy on orphaned package](https://cran.r-project.org/src/contrib/Orphaned/README), that disappointment quickly dissipated:
+
+> Everybody is more than welcome to take over as maintainer of an orphaned
+package.  Simply download the package sources, make changes if necessary
+(respecting original author and license!) and resubmit the package to
+CRAN with your name as maintainer in the DESCRIPTION file of the
+package.
+
+It seemed like I could become the maintainer of the Metrics package and fix the bug myself!
+
+### Becoming the Maintainer
+
+In the fall of 2017, I began [my effort](https://github.com/mfrasco/Metrics) to fix the problems that caused `Metrics` to become orphaned and re-submit it to CRAN. I recognized four tasks that needed to be completed for this process.
+
+1. Repository infrastructure
+2. Improving documentation
+3. Adding new functions
+4. Fixing bugs
+
+#### Repository Infrastructure
+
+Many open source projects use Travis CI in order to continuously test the code as new commits are added. Importantly, I made sure that the package was tested with `R CMD check --as-cran` and treated warnings as errors. This would help me identify if anything in my package changed so that couldn't be accepted on CRAN.
+
+Next, I performed an overhaul of the unit testing infrastructure in the package. The previous maintainer had used `RUnit`, which is based off of the `xUnit` family of unit testing frameworks. However, I am much more familiar with the `testthat` package in R. While it was a bit of manual work to copy all of the tests from one framework to another, it gave me good exposure to how all of the functions work.
+
+#### Improving Documentation
+
+I strongly believe in the value of good documentation. It's a hill that I am willing to die on. As a result, I spent a few days thinking about the best way to communicate how the functions within the `Metrics` package work to someone seeing them for the first time. I added working examples to every function, linked related functions together, and clarified confusing concepts. Writing documentation in R is really easy with the `roxygen2` package. Thanks to Hadley Wickham and the `RStudio` team for providing so many useful packages.
+
+#### Adding New Functions
+
+`Metrics` is a simple package that provides implementations of common machine learning metrics for regression, time series, classification, and information retrieval problems. While the set of functions provided in `Metrics` is large, it does not exhaust the entire machine learning problem space.
+
+For example, it provided an function called `f1` which implements the `f1` score in the context of information retrieval problems, but not for classification problems.
+
+It provided a function called `mape`, which is the mean absolute percent error, for regression problems. But it didn't provide any of the variants of `mape` such as [smape](https://en.wikipedia.org/wiki/Symmetric_mean_absolute_percentage_error) or [mase](https://en.wikipedia.org/wiki/Mean_absolute_scaled_error).
+
+In my effort to re-submit the package to CRAN, I had to balance my desire to add as many functions as possible with my fear that someone else would come along and become the maintainer before me.
+
+#### Fixing Bugs
+
+I wanted to become the maintainer of the `Metrics` package in order to fix a single bug in the `auc` function. Fortunately, there weren't that many other problems with the package, which allowed me to focus on improving the documentation and adding new functions.
+
+### Conclusion
+
+Overall, the process of becoming the maintainer of the `Metrics` package was incredibly rewarding. I learned about the nuances of using the ROC curve to evaluate machine learning classifiers. I gained valuable experience in optimizing the speed of R code. I was extremely happy to contribute back to the open source community.
+
+But this journey is not over. My next steps are to improve my C++ skills so that I can implement a fast version of `rank` to be used within `Metrics::auc`.
