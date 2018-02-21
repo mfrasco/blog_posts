@@ -1,11 +1,13 @@
 ---
-title: "My Path Down the AUC Rabbit Hole and into Open Source"
+title: "Down the AUC Rabbit Hole and into Open Source"
 author: "Michael Frasco"
-date: "2018-02-10"
-output: html_document
+date: '2018-02-10'
+output:
+  html_document: default
+  pdf_document: default
 ---
 
-On 2017-11-03, my eight month journey into the world of open source software reached its first major milestone when I became the new maintainer of the [Metrics package](https://github.com/mfrasco/Metrics) in R. The path I took to get there is full of fascinating statistics and the excitement of contributing to something bigger than the collection of files on my local machine. I want to tell you the story.
+On 2017-11-03, my eight month journey into the world of open source software reached its first major milestone when I became the new maintainer of the [Metrics package](https://cran.r-project.org/web/packages/Metrics/index.html) in R. The path I took to get there is full of fascinating statistics and the excitement of contributing to something bigger than the collection of files on my local machine. I want to tell you the story.
 
 ## Peaking Into the Rabbit Hole
 
@@ -63,7 +65,7 @@ microbenchmark(rocr = rocr_auc(preds, target), fast = fast_auc(preds, target), t
 
 With a data set of two million observations, the fast function is about ten times faster than the ROCR function. While 2-3 seconds may not seem like a long time, repeated uses of this function can become costly. In the PR where this function was used, my teammate was building tools that searched over different feature engineering and model building strategies. She used the AUC from each successive model to intelligently guide the search, which required computing the AUC for hundreds of models. By using this faster function, she saved a significant amount of computation time.
 
-It's worth saying that the biggest cause for the speedup in `fast_auc` is the C++ implementation of `frank` from the `data.table` package. This function is significantly faster than `rank` in base R. Indeed, using the `precrec` package, which is also implemented in C++, to calculate the full ROC curve is actually faster than using the algorithm above with `rank` instead of `frank`. Thanks to Matt Dowle and the `data.table` team for all of their amazing work.
+It's worth saying that the biggest cause for the speedup in `fast_auc` is the C++ implementation of `frank` from the `data.table` package. This function is significantly faster than `rank` in base R. Indeed, using the `precrec` package, which is also implemented in C++, to calculate the full ROC curve is actually faster than using the algorithm above with `rank` instead of `frank`. Thanks to Matt Dowle, Arun Srinivasan, and the `data.table` team for all of their amazing work.
 
 Looking back on this problem in optimization, an even faster strategy would have been to compute the AUC on a random sample of observations. Luckily, that solution wasn't used in the PR. If it had been, I would have never gone down this journey.
 
@@ -106,7 +108,7 @@ Therefore, if we sum the rankings from the positive class and subtract `N * (N -
 
 ### Rethinking our Interpretation of AUC
 
-I just lied to you. `fast_auc` takes the count of the number of pairs where the observation from the positive class is greater than the observation from the negative class and divides it by the total number of possible pairs. Since the probability of an event happening is equal to the total number of times it happens divided by the total number of times it could happen, we can interpret the output of `fast_auc` as providing the probability that a randomly chosen observation from the positive class is greater than a randomly chosen observation from the negative class.
+Actually, `fast_auc` takes the count of the number of pairs where the observation from the positive class is greater than the observation from the negative class and divides it by the total number of possible pairs. Since the probability of an event happening is equal to the total number of times it happens divided by the total number of times it could happen, we can interpret the output of `fast_auc` as providing the probability that a randomly chosen observation from the positive class is greater than a randomly chosen observation from the negative class.
 
 This is worth restating. AUC, which is usually thought of as the area under a curve created by plotting the sensitivity and specificity of a classifier at different thresholds, has this interpretation:
 
@@ -152,7 +154,7 @@ $$
 AUC & = & \int_{-\infty}^{\infty} \Big[\int_{t}^{\infty} f_1(s) ~ds\Big] ~f_0(t) ~dt \\
 & = & \int_{-\infty}^{\infty} \int_{t}^{\infty} f_1(s) ~f_0(t) ~ds ~dt \\
 & = & \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} I(s > t) ~f_1(s) ~f_0(t) ~ds ~dt \\
-& = & P(s > t)
+& = & P(x_1 > x_0)
 \end{eqnarray}
 $$
 
@@ -160,9 +162,9 @@ Here, $I(s > t)$ is the indicator function for the event that a randomly chosen 
 
 ## Contributing to Open Source
 
-While I was absorbing as much information about AUC, I also checked whether various open source tools were aware of this fast algorithm. While I had never contributed to an open source project before, it was something that I always wanted to do.
+While I was absorbing as much information about AUC as I could, I also checked whether various open source tools were aware of this fast algorithm. While I had never contributed to an open source project before, it was something that I always wanted to do.
 
-Of all of the different packages I looked at, one stuck out in particular: the `Metrics` package in R. When I first came across it, the function looked like this:
+Of all of the different packages I looked at, one stuck out in particular: the `Metrics` package in R. It had a function that calculated auc like this:
 
 ```{r}
 auc <- function(actual, predicted) {
@@ -174,7 +176,7 @@ auc <- function(actual, predicted) {
 }
 ```
 
-Other than the use of `rank` instead of `data.table::frank`, the function from the Metrics package was almost identical to `fast_auc` from above. It was extremely satisfying to see that other people were using the same fast algorithm. However, there was one problem: `metrics::auc` didn't work on large datasets.
+Other than the use of `rank` instead of `data.table::frank`, the function from the Metrics package was almost identical to `fast_auc` from above. It was extremely satisfying to see this algorithm used elsewhere, as if it validated the effort I had invested in understanding it. However, there was one problem: the function didn't work on large datasets.
 
 ```{r}
 preds <- c(rbeta(1e6, 25, 30), rbeta(1e6, 30, 25))
@@ -182,7 +184,7 @@ target <- rep(c(0, 1), each = 1e6)
 auc(target, preds)
 ```
 
-The integer overflow was caused by the fact that `sum(actual == )` produces an integer, `length(actual)` produces an integer, and subtracting two integers in also produces an integer. As a result, `n_pos` and `n_neg` are both represented as integers when `n_pos * n_neg` is executed. Unfortunately, for large datasets, this can often lead to values greater than `2 ^ 31 - 1`, which is greater than the value of `.Machine$integer.max` on most computers.
+The integer overflow was caused by the fact that `sum(actual == 1)` produces an integer, `length(actual)` produces an integer, and subtracting two integers also produces an integer. As a result, `n_pos` and `n_neg` are both represented as integers when `n_pos * n_neg` is executed. For large datasets, this can often lead to values greater than `2 ^ 31 - 1`, which is greater than the value of `.Machine$integer.max` on most computers.
 
 ### My First Pull Request
 
@@ -190,7 +192,7 @@ Fortunately, the function could be fixed in a single line. All I needed to do wa
 
 When I submitted [a pull request](https://github.com/benhamner/Metrics/pull/36) containing my bugfix, the package failed to build on Travis CI. However, the problem wasn't with my PR. After looking at the other isues and pull requests in the repository, I realized that the person who had originally authored the package was no longer actively maintaining the repository or any of its tests. In fact, [an issue](https://github.com/benhamner/Metrics/issues/34) had been recently created informing the package maintainer that CRAN had changed the maintainer status of the package to "ORPHANED". This happens when the package maintainer is unresponsive to emails.
 
-Initially, I was disappointed that my PR wouldn't be accepted and that the integer overflow bug wouldn't be fixed. However, when I read through CRAN's [policy on orphaned package](https://cran.r-project.org/src/contrib/Orphaned/README), that disappointment quickly dissipated:
+Initially, I was disappointed that my PR wouldn't be accepted and that the integer overflow bug wouldn't be fixed. However, when I read through CRAN's [policy on orphaned packages](https://cran.r-project.org/src/contrib/Orphaned/README), that disappointment quickly dissipated:
 
 > Everybody is more than welcome to take over as maintainer of an orphaned
 package.  Simply download the package sources, make changes if necessary
@@ -202,7 +204,7 @@ It seemed like I could become the maintainer of the Metrics package and fix the 
 
 ### Becoming the Maintainer
 
-In the fall of 2017, I began [my effort](https://github.com/mfrasco/Metrics) to fix the problems that caused `Metrics` to become orphaned and re-submit it to CRAN. I recognized four tasks that needed to be completed for this process.
+In the fall of 2017, I began [my effort](https://github.com/mfrasco/Metrics) to fix the `auc` bug and the other problems that caused `Metrics` to become orphaned. Then, I'd re-submit it to CRAN. I recognized four tasks that needed to be completed for this process.
 
 1. Repository infrastructure
 2. Improving documentation
@@ -211,21 +213,19 @@ In the fall of 2017, I began [my effort](https://github.com/mfrasco/Metrics) to 
 
 #### Repository Infrastructure
 
-Many open source projects use Travis CI in order to continuously test the code as new commits are added. Importantly, I made sure that the package was tested with `R CMD check --as-cran` and treated warnings as errors. This would help me identify if anything in my package changed so that couldn't be accepted on CRAN.
+Many open source projects use Travis CI in order to continuously test the code as new commits are added. When I set this up for `Metrics`, I made sure that the package was tested with `R CMD check --as-cran` and that warnings were treated as errors. This would help me be confident that my package maintained CRAN's standards with each new change.
 
 Next, I performed an overhaul of the unit testing infrastructure in the package. The previous maintainer had used `RUnit`, which is based off of the `xUnit` family of unit testing frameworks. However, I am much more familiar with the `testthat` package in R. While it was a bit of manual work to copy all of the tests from one framework to another, it gave me good exposure to how all of the functions work.
 
 #### Improving Documentation
 
-I strongly believe in the value of good documentation. It's a hill that I am willing to die on. As a result, I spent a few days thinking about the best way to communicate how the functions within the `Metrics` package work to someone seeing them for the first time. I added working examples to every function, linked related functions together, and clarified confusing concepts. Writing documentation in R is really easy with the `roxygen2` package. Thanks to Hadley Wickham and the `RStudio` team for providing so many useful packages.
+I strongly believe in the value of good documentation. It's a hill that I am willing to die on. As a result, I spent a few days thinking about the best way to communicate how the functions within the `Metrics` package work to someone seeing them for the first time. I added working examples to every function, linked related functions together, and clarified confusing concepts. Writing documentation in R is really easy with the `roxygen2` package. Thanks to Hadley Wickham and the `RStudio` team for providing this package and so many other useful packages.
 
 #### Adding New Functions
 
 `Metrics` is a simple package that provides implementations of common machine learning metrics for regression, time series, classification, and information retrieval problems. While the set of functions provided in `Metrics` is large, it does not exhaust the entire machine learning problem space.
 
-For example, it provided an function called `f1` which implements the `f1` score in the context of information retrieval problems, but not for classification problems.
-
-It provided a function called `mape`, which is the mean absolute percent error, for regression problems. But it didn't provide any of the variants of `mape` such as [smape](https://en.wikipedia.org/wiki/Symmetric_mean_absolute_percentage_error) or [mase](https://en.wikipedia.org/wiki/Mean_absolute_scaled_error).
+For example, it provided an function called `f1` which implements the f1-score in the context of information retrieval problems, but not for classification problems. It also provided a function called `mape`, which is the mean absolute percent error, for regression problems. But it didn't provide any of the variants of `mape` such as [smape](https://en.wikipedia.org/wiki/Symmetric_mean_absolute_percentage_error) or [mase](https://en.wikipedia.org/wiki/Mean_absolute_scaled_error).
 
 In my effort to re-submit the package to CRAN, I had to balance my desire to add as many functions as possible with my fear that someone else would come along and become the maintainer before me.
 
@@ -236,5 +236,9 @@ I wanted to become the maintainer of the `Metrics` package in order to fix a sin
 ### Conclusion
 
 Overall, the process of becoming the maintainer of the `Metrics` package was incredibly rewarding. I learned about the nuances of using the ROC curve to evaluate machine learning classifiers. I gained valuable experience in optimizing the speed of R code. I was extremely happy to contribute back to the open source community.
+
+When I received the email below from CRAN, I jumped out of my seat. Eight months of hard work had finally been realized.
+
+![](cran_acceptance.png)
 
 But this journey is not over. My next steps are to improve my C++ skills so that I can implement a fast version of `rank` to be used within `Metrics::auc`.
