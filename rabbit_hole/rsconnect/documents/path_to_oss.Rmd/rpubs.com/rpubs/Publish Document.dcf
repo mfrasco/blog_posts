@@ -1,0 +1,10 @@
+name: Publish Document
+title:
+username:
+account: rpubs
+server: rpubs.com
+hostUrl: rpubs.com
+appId: https://api.rpubs.com/api/v1/document/358661/56205fc23796477f8b4de54cc94a2780
+bundleId: https://api.rpubs.com/api/v1/document/358661/56205fc23796477f8b4de54cc94a2780
+url: http://rpubs.com/mfrasco6/358661
+when: 1518326613.75706
